@@ -131,25 +131,66 @@ $container->set('helper', function ($c) {
             $options += ['all_comments' => false];
             $all_comments = $options['all_comments'];
 
+            if (empty($results)) {
+                return [];
+            }
+
+            $db = $this->db();
+            $post_ids = array_column($results, 'id');
+            $placeholder = implode(',', array_fill(0, count($post_ids), '?'));
+
+            // コメント数を一括集計
+            $ps = $db->prepare("SELECT `post_id`, COUNT(*) AS `count` FROM `comments` WHERE `post_id` IN ($placeholder) GROUP BY `post_id`");
+            $ps->execute($post_ids);
+            $comment_counts = array_column($ps->fetchAll(PDO::FETCH_ASSOC), 'count', 'post_id');
+
+            // コメントをJOINでユーザー情報込みで一括取得（ROW_NUMBER()でLIMIT相当を実現）
+            $rn_filter = $all_comments ? '' : 'AND `rn` <= 3';
+            $ps = $db->prepare("
+                SELECT c.`id`, c.`post_id`, c.`user_id`, c.`comment`, c.`created_at`,
+                       u.`id` AS `u_id`, u.`account_name`, u.`passhash`, u.`authority`, u.`del_flg`, u.`created_at` AS `u_created_at`
+                FROM (
+                    SELECT *, ROW_NUMBER() OVER (PARTITION BY `post_id` ORDER BY `created_at` DESC) AS `rn`
+                    FROM `comments` WHERE `post_id` IN ($placeholder)
+                ) c
+                JOIN `users` u ON c.`user_id` = u.`id`
+                WHERE 1=1 $rn_filter
+                ORDER BY c.`post_id`, c.`created_at` ASC
+            ");
+            $ps->execute($post_ids);
+            $comments_by_post = [];
+            foreach ($ps->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                $comment = [
+                    'id'         => $row['id'],
+                    'post_id'    => $row['post_id'],
+                    'user_id'    => $row['user_id'],
+                    'comment'    => $row['comment'],
+                    'created_at' => $row['created_at'],
+                    'user'       => [
+                        'id'           => $row['u_id'],
+                        'account_name' => $row['account_name'],
+                        'passhash'     => $row['passhash'],
+                        'authority'    => $row['authority'],
+                        'del_flg'      => $row['del_flg'],
+                        'created_at'   => $row['u_created_at'],
+                    ],
+                ];
+                $comments_by_post[$row['post_id']][] = $comment;
+            }
+
+            // 投稿ユーザーを一括取得
+            $user_ids = array_values(array_unique(array_column($results, 'user_id')));
+            $uph = implode(',', array_fill(0, count($user_ids), '?'));
+            $ps = $db->prepare("SELECT * FROM `users` WHERE `id` IN ($uph) AND `del_flg` = 0");
+            $ps->execute($user_ids);
+            $users_by_id = array_column($ps->fetchAll(PDO::FETCH_ASSOC), null, 'id');
+
             $posts = [];
             foreach ($results as $post) {
-                $post['comment_count'] = $this->fetch_first('SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = ?', $post['id'])['count'];
-                $query = 'SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC';
-                if (!$all_comments) {
-                    $query .= ' LIMIT 3';
-                }
-
-                $ps = $this->db()->prepare($query);
-                $ps->execute([$post['id']]);
-                $comments = $ps->fetchAll(PDO::FETCH_ASSOC);
-                foreach ($comments as &$comment) {
-                    $comment['user'] = $this->fetch_first('SELECT * FROM `users` WHERE `id` = ?', $comment['user_id']);
-                }
-                unset($comment);
-                $post['comments'] = array_reverse($comments);
-
-                $post['user'] = $this->fetch_first('SELECT * FROM `users` WHERE `id` = ?', $post['user_id']);
-                if ($post['user']['del_flg'] == 0) {
+                $post['comment_count'] = $comment_counts[$post['id']] ?? 0;
+                $post['comments'] = $comments_by_post[$post['id']] ?? [];
+                $post['user'] = $users_by_id[$post['user_id']] ?? null;
+                if ($post['user'] !== null && $post['user']['del_flg'] == 0) {
                     $posts[] = $post;
                 }
                 if (count($posts) >= POSTS_PER_PAGE) {
@@ -302,7 +343,7 @@ $app->get('/', function (Request $request, Response $response) {
     $me = $this->get('helper')->get_session_user();
 
     $db = $this->get('db');
-    $ps = $db->prepare('SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` ORDER BY `created_at` DESC');
+    $ps = $db->prepare('SELECT p.`id`, p.`user_id`, p.`body`, p.`mime`, p.`created_at` FROM `posts` p JOIN `users` u ON p.`user_id` = u.`id` WHERE u.`del_flg` = 0 ORDER BY p.`created_at` DESC LIMIT 20');
     $ps->execute();
     $results = $ps->fetchAll(PDO::FETCH_ASSOC);
     $posts = $this->get('helper')->make_posts($results);
@@ -318,8 +359,13 @@ $app->get('/posts', function (Request $request, Response $response) {
     $params = $request->getQueryParams();
     $max_created_at = $params['max_created_at'] ?? null;
     $db = $this->get('db');
-    $ps = $db->prepare('SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `created_at` <= ? ORDER BY `created_at` DESC');
-    $ps->execute([$max_created_at === null ? null : $max_created_at]);
+    if ($max_created_at === null) {
+        $ps = $db->prepare('SELECT p.`id`, p.`user_id`, p.`body`, p.`mime`, p.`created_at` FROM `posts` p JOIN `users` u ON p.`user_id` = u.`id` WHERE u.`del_flg` = 0 ORDER BY p.`created_at` DESC LIMIT 20');
+        $ps->execute();
+    } else {
+        $ps = $db->prepare('SELECT p.`id`, p.`user_id`, p.`body`, p.`mime`, p.`created_at` FROM `posts` p JOIN `users` u ON p.`user_id` = u.`id` WHERE u.`del_flg` = 0 AND p.`created_at` <= ? ORDER BY p.`created_at` DESC LIMIT 20');
+        $ps->execute([$max_created_at]);
+    }
     $results = $ps->fetchAll(PDO::FETCH_ASSOC);
     $posts = $this->get('helper')->make_posts($results);
 
@@ -498,20 +544,18 @@ $app->get('/@{account_name}', function (Request $request, Response $response, $a
         return $response->withStatus(404);
     }
 
-    $ps = $db->prepare('SELECT `id`, `user_id`, `body`, `created_at`, `mime` FROM `posts` WHERE `user_id` = ? ORDER BY `created_at` DESC');
+    $ps = $db->prepare('SELECT `id`, `user_id`, `body`, `created_at`, `mime` FROM `posts` WHERE `user_id` = ? ORDER BY `created_at` DESC LIMIT 40');
     $ps->execute([$user['id']]);
     $results = $ps->fetchAll(PDO::FETCH_ASSOC);
     $posts = $this->get('helper')->make_posts($results);
 
     $comment_count = $this->get('helper')->fetch_first('SELECT COUNT(*) AS count FROM `comments` WHERE `user_id` = ?', $user['id'])['count'];
 
-    $ps = $db->prepare('SELECT `id` FROM `posts` WHERE `user_id` = ?');
-    $ps->execute([$user['id']]);
-    $post_ids = array_column($ps->fetchAll(PDO::FETCH_ASSOC), 'id');
-    $post_count = count($post_ids);
+    $post_count = $this->get('helper')->fetch_first('SELECT COUNT(*) AS count FROM `posts` WHERE `user_id` = ?', $user['id'])['count'];
 
+    $post_ids = array_column($results, 'id');
     $commented_count = 0;
-    if ($post_count > 0) {
+    if (!empty($post_ids)) {
         $placeholder = implode(',', array_fill(0, count($post_ids), '?'));
         $commented_count = $this->get('helper')->fetch_first("SELECT COUNT(*) AS count FROM `comments` WHERE `post_id` IN ({$placeholder})", ...$post_ids)['count'];
     }
