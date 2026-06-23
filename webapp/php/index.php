@@ -118,12 +118,14 @@ $container->set('helper', function ($c) {
                 mkdir($image_dir, 0755, true);
             }
             $ps2 = $db->query('SELECT `id`, `mime`, `imgdata` FROM `posts`');
+            $ps2->setFetchMode(PDO::FETCH_ASSOC);
             $ext_map = ['image/jpeg' => 'jpg', 'image/png' => 'png', 'image/gif' => 'gif'];
-            foreach ($ps2->fetchAll(PDO::FETCH_ASSOC) as $img) {
+            while ($img = $ps2->fetch()) {
                 $ext = $ext_map[$img['mime']] ?? null;
                 if ($ext) {
                     file_put_contents($image_dir . $img['id'] . '.' . $ext, $img['imgdata']);
                 }
+                unset($img);
             }
         }
 
