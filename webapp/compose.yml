@@ -30,7 +30,7 @@ services:
     networks:
       - my_network
     volumes:
-      - ./public:/home/public
+      - ./public:/var/www/public
     init: true
     deploy:
       resources:

@@ -144,9 +144,16 @@ Common optimization targets:
 - Start with: `bundle exec unicorn -c unicorn_config.rb`
 
 ### PHP Implementation (webapp/php/)
-- Uses `Slim` framework with `PHP-FPM`
-- Requires nginx configuration change for routing
-- Database access via `PDO`
+- Uses `Slim 4` framework with `PHP-FPM 8.3` and `php-di` (DI container)
+- Single entry point: `webapp/php/index.php` — all routes defined there
+- Views: `webapp/php/views/` (PHP templates via `slim/php-view`; `layout.php` wraps all views)
+- Session via Memcached (`session.save_handler=memcached`); CSRF token stored in `$_SESSION['csrf_token']`
+- Database access via `PDO`; helper methods (`fetch_first`, `make_posts`, etc.) in the `helper` container service
+- Password hashing: shells out to `openssl dgst -sha512` via backtick — a known performance bottleneck
+- Image data stored as BLOB in `posts.imgdata` column; served at `/image/{id}.{ext}`
+- `make_posts()` has N+1 query problems (per-post queries for comment counts, comments, and user lookups)
+- Install dependencies: `cd webapp/php && composer install`
+- Docker image: `php:8.3-fpm-bookworm` with `pdo_mysql` and `memcached` PECL extensions
 
 ### Python Implementation (webapp/python/)
 - Uses `Flask` framework with `gunicorn`

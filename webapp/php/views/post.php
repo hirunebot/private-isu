@@ -10,7 +10,7 @@
   </div>
   <div class="isu-post-text">
     <a href="/@<?= escape_html(rawurlencode($post['user']['account_name'])) ?>" class="isu-post-account-name"><?= escape_html($post['user']['account_name']) ?></a>
-    <?= escape_html(nl2br($post['body'])) ?>
+    <?= nl2br(escape_html($post['body'])) ?>
   </div>
   <div class="isu-post-comment">
     <div class="isu-post-comment-count">

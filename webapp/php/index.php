@@ -55,7 +55,8 @@ $container->set('db', function ($c) {
     return new PDO(
         "mysql:dbname={$config['db']['database']};host={$config['db']['host']};port={$config['db']['port']};charset=utf8mb4",
         $config['db']['username'],
-        $config['db']['password']
+        $config['db']['password'],
+        [PDO::ATTR_PERSISTENT => true]
     );
 });
 
@@ -101,7 +102,9 @@ $container->set('helper', function ($c) {
             }
             // 既存の画像をファイルシステムに書き出す
             $image_dir = dirname(dirname(__FILE__)) . '/../public/image/';
-            if (!is_dir($image_dir)) {
+            if (is_dir($image_dir)) {
+                array_map('unlink', glob($image_dir . '*') ?: []);
+            } else {
                 mkdir($image_dir, 0755, true);
             }
             $ps2 = $db->query('SELECT `id`, `mime`, `imgdata` FROM `posts`');
@@ -124,33 +127,24 @@ $container->set('helper', function ($c) {
         }
 
         public function try_login($account_name, $password) {
-            $user = $this->fetch_first('SELECT * FROM users WHERE account_name = ? AND del_flg = 0', $account_name);
+            $user = $this->fetch_first('SELECT `id`, `account_name`, `passhash`, `authority`, `del_flg`, `created_at` FROM users WHERE account_name = ? AND del_flg = 0', $account_name);
             if ($user !== false && calculate_passhash($user['account_name'], $password) == $user['passhash']) {
+                unset($user['passhash']);
                 return $user;
-            } elseif ($user) {
-                return null;
-            } else {
-                return null;
             }
+            return null;
         }
 
         public function get_session_user() {
             if (!isset($_SESSION['user']['id'])) {
                 return null;
             }
-            if (isset($_SESSION['user']['account_name'])) {
-                $row = $this->fetch_first('SELECT `del_flg` FROM `users` WHERE `id` = ?', $_SESSION['user']['id']);
-                if (!$row || $row['del_flg'] != 0) {
-                    unset($_SESSION['user']);
-                    return null;
-                }
-                return $_SESSION['user'];
+            $row = $this->fetch_first('SELECT `del_flg` FROM `users` WHERE `id` = ?', $_SESSION['user']['id']);
+            if (!$row || $row['del_flg'] != 0) {
+                unset($_SESSION['user']);
+                return null;
             }
-            $user = $this->fetch_first('SELECT * FROM `users` WHERE `id` = ?', $_SESSION['user']['id']);
-            if ($user) {
-                $_SESSION['user'] = $user;
-            }
-            return $user ?: null;
+            return $_SESSION['user'];
         }
 
         public function make_posts(array $results, $options = []) {
@@ -174,9 +168,9 @@ $container->set('helper', function ($c) {
             $rn_filter = $all_comments ? '' : 'AND `rn` <= 3';
             $ps = $db->prepare("
                 SELECT c.`id`, c.`post_id`, c.`user_id`, c.`comment`, c.`created_at`,
-                       u.`id` AS `u_id`, u.`account_name`, u.`passhash`, u.`authority`, u.`del_flg`, u.`created_at` AS `u_created_at`
+                       u.`id` AS `u_id`, u.`account_name`, u.`authority`, u.`del_flg`, u.`created_at` AS `u_created_at`
                 FROM (
-                    SELECT *, ROW_NUMBER() OVER (PARTITION BY `post_id` ORDER BY `created_at` DESC) AS `rn`
+                    SELECT *, ROW_NUMBER() OVER (PARTITION BY `post_id` ORDER BY `created_at` DESC, `id` DESC) AS `rn`
                     FROM `comments` WHERE `post_id` IN ($placeholder)
                 ) c
                 JOIN `users` u ON c.`user_id` = u.`id`
@@ -195,7 +189,6 @@ $container->set('helper', function ($c) {
                     'user'       => [
                         'id'           => $row['u_id'],
                         'account_name' => $row['account_name'],
-                        'passhash'     => $row['passhash'],
                         'authority'    => $row['authority'],
                         'del_flg'      => $row['del_flg'],
                         'created_at'   => $row['u_created_at'],
@@ -207,7 +200,7 @@ $container->set('helper', function ($c) {
             // 投稿ユーザーを一括取得
             $user_ids = array_values(array_unique(array_column($results, 'user_id')));
             $uph = implode(',', array_fill(0, count($user_ids), '?'));
-            $ps = $db->prepare("SELECT * FROM `users` WHERE `id` IN ($uph) AND `del_flg` = 0");
+            $ps = $db->prepare("SELECT `id`, `account_name`, `authority`, `del_flg`, `created_at` FROM `users` WHERE `id` IN ($uph) AND `del_flg` = 0");
             $ps->execute($user_ids);
             $users_by_id = array_column($ps->fetchAll(PDO::FETCH_ASSOC), null, 'id');
 
@@ -296,7 +289,6 @@ $app->post('/login', function (Request $request, Response $response) {
         return redirect($response, '/', 302);
     }
 
-    $db = $this->get('db');
     $params = $request->getParsedBody();
     $user = $this->get('helper')->try_login($params['account_name'], $params['password']);
 
@@ -349,7 +341,7 @@ $app->post('/register', function (Request $request, Response $response) {
         calculate_passhash($account_name, $password)
     ]);
     $new_id = $db->lastInsertId();
-    $new_user = $this->get('helper')->fetch_first('SELECT * FROM `users` WHERE `id` = ?', $new_id);
+    $new_user = $this->get('helper')->fetch_first('SELECT `id`, `account_name`, `authority`, `del_flg`, `created_at` FROM `users` WHERE `id` = ?', $new_id);
     $_SESSION['user'] = $new_user;
     $_SESSION['csrf_token'] = bin2hex(random_bytes(16));
     return redirect($response, '/', 302);
@@ -396,7 +388,7 @@ $app->get('/posts', function (Request $request, Response $response) {
 
 $app->get('/posts/{id}', function (Request $request, Response $response, $args) {
     $db = $this->get('db');
-    $ps = $db->prepare('SELECT * FROM `posts` WHERE `id` = ?');
+    $ps = $db->prepare('SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `id` = ?');
     $ps->execute([$args['id']]);
     $results = $ps->fetchAll(PDO::FETCH_ASSOC);
     $posts = $this->get('helper')->make_posts($results, ['all_comments' => true]);
@@ -440,24 +432,28 @@ $app->post('/', function (Request $request, Response $response) {
             return redirect($response, '/', 302);
         }
 
-        if (strlen(file_get_contents($_FILES['file']['tmp_name'])) > UPLOAD_LIMIT) {
+        if (filesize($_FILES['file']['tmp_name']) > UPLOAD_LIMIT) {
             $this->get('flash')->addMessage('notice', 'ファイルサイズが大きすぎます');
             return redirect($response, '/', 302);
         }
 
+        $imgdata = file_get_contents($_FILES['file']['tmp_name']);
         $db = $this->get('db');
         $query = 'INSERT INTO `posts` (`user_id`, `mime`, `imgdata`, `body`) VALUES (?,?,?,?)';
         $ps = $db->prepare($query);
         $ps->execute([
           $me['id'],
           $mime,
-          file_get_contents($_FILES['file']['tmp_name']),
+          $imgdata,
           $params['body'],
         ]);
         $pid = $db->lastInsertId();
         $image_dir = dirname(dirname(__FILE__)) . '/../public/image/';
         $ext_map = ['image/jpeg' => 'jpg', 'image/png' => 'png', 'image/gif' => 'gif'];
-        file_put_contents($image_dir . $pid . '.' . $ext_map[$mime], file_get_contents($_FILES['file']['tmp_name']));
+        if (!is_dir($image_dir)) {
+            mkdir($image_dir, 0755, true);
+        }
+        file_put_contents($image_dir . $pid . '.' . $ext_map[$mime], $imgdata);
         return redirect($response, "/posts/{$pid}", 302);
     } else {
         $this->get('flash')->addMessage('notice', '画像が必須です');
@@ -485,11 +481,21 @@ $app->get('/image/{id}.{ext}', function (Request $request, Response $response, $
             ->withHeader('Cache-Control', 'max-age=86400, public');
     }
 
-    $post = $this->get('helper')->fetch_first('SELECT * FROM `posts` WHERE `id` = ?', $args['id']);
+    $post = $this->get('helper')->fetch_first('SELECT `id`, `mime`, `imgdata` FROM `posts` WHERE `id` = ?', $args['id']);
+
+    if ($post === false) {
+        $response->getBody()->write('404');
+        return $response->withStatus(404);
+    }
 
     if (($args['ext'] == 'jpg' && $post['mime'] == 'image/jpeg') ||
         ($args['ext'] == 'png' && $post['mime'] == 'image/png') ||
         ($args['ext'] == 'gif' && $post['mime'] == 'image/gif')) {
+        // ファイルシステムに保存して以降はnginxが直接返せるようにする
+        if (!is_dir($image_dir)) {
+            mkdir($image_dir, 0755, true);
+        }
+        file_put_contents($file, $post['imgdata']);
         $response->getBody()->write($post['imgdata']);
         return $response
             ->withHeader('Content-Type', $post['mime'])
@@ -542,7 +548,7 @@ $app->get('/admin/banned', function (Request $request, Response $response) {
     }
 
     $db = $this->get('db');
-    $ps = $db->prepare('SELECT * FROM `users` WHERE `authority` = 0 AND `del_flg` = 0 ORDER BY `created_at` DESC');
+    $ps = $db->prepare('SELECT `id`, `account_name` FROM `users` WHERE `authority` = 0 AND `del_flg` = 0 ORDER BY `created_at` DESC');
     $ps->execute();
     $users = $ps->fetchAll(PDO::FETCH_ASSOC);
 
@@ -569,8 +575,8 @@ $app->post('/admin/banned', function (Request $request, Response $response) {
 
     $db = $this->get('db');
     $query = 'UPDATE `users` SET `del_flg` = ? WHERE `id` = ?';
+    $ps = $db->prepare($query);
     foreach ($params['uid'] as $id) {
-        $ps = $db->prepare($query);
         $ps->execute([1, $id]);
     }
 
@@ -579,14 +585,14 @@ $app->post('/admin/banned', function (Request $request, Response $response) {
 
 $app->get('/@{account_name}', function (Request $request, Response $response, $args) {
     $db = $this->get('db');
-    $user = $this->get('helper')->fetch_first('SELECT * FROM `users` WHERE `account_name` = ? AND `del_flg` = 0', $args['account_name']);
+    $user = $this->get('helper')->fetch_first('SELECT `id`, `account_name`, `authority`, `del_flg`, `created_at` FROM `users` WHERE `account_name` = ? AND `del_flg` = 0', $args['account_name']);
 
     if ($user === false) {
         $response->getBody()->write('404');
         return $response->withStatus(404);
     }
 
-    $ps = $db->prepare('SELECT `id`, `user_id`, `body`, `created_at`, `mime` FROM `posts` WHERE `user_id` = ? ORDER BY `created_at` DESC LIMIT 40');
+    $ps = $db->prepare('SELECT p.`id`, p.`user_id`, p.`body`, p.`created_at`, p.`mime` FROM `posts` p JOIN `users` u ON p.`user_id` = u.`id` WHERE p.`user_id` = ? AND u.`del_flg` = 0 ORDER BY p.`created_at` DESC LIMIT 20');
     $ps->execute([$user['id']]);
     $results = $ps->fetchAll(PDO::FETCH_ASSOC);
     $posts = $this->get('helper')->make_posts($results);
@@ -595,12 +601,10 @@ $app->get('/@{account_name}', function (Request $request, Response $response, $a
 
     $post_count = $this->get('helper')->fetch_first('SELECT COUNT(*) AS count FROM `posts` WHERE `user_id` = ?', $user['id'])['count'];
 
-    $post_ids = array_column($results, 'id');
-    $commented_count = 0;
-    if (!empty($post_ids)) {
-        $placeholder = implode(',', array_fill(0, count($post_ids), '?'));
-        $commented_count = $this->get('helper')->fetch_first("SELECT COUNT(*) AS count FROM `comments` WHERE `post_id` IN ({$placeholder})", ...$post_ids)['count'];
-    }
+    $commented_count = $this->get('helper')->fetch_first(
+        'SELECT COUNT(*) AS count FROM `comments` c JOIN `posts` p ON c.`post_id` = p.`id` WHERE p.`user_id` = ?',
+        $user['id']
+    )['count'];
 
     $me = $this->get('helper')->get_session_user();
 
