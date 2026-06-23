@@ -51,9 +51,11 @@ $container->set('settings', function() {
     ];
 });
 $container->set('memcached', function () use ($memd_addr) {
-    $mc = new Memcached();
-    [$host, $port] = explode(':', $memd_addr);
-    $mc->addServer($host, (int)$port);
+    $mc = new Memcached('isucon');
+    if (!$mc->getServerList()) {
+        [$host, $port] = explode(':', $memd_addr);
+        $mc->addServer($host, (int)$port);
+    }
     return $mc;
 });
 
@@ -63,7 +65,7 @@ $container->set('db', function ($c) {
         "mysql:dbname={$config['db']['database']};host={$config['db']['host']};port={$config['db']['port']};charset=utf8mb4",
         $config['db']['username'],
         $config['db']['password'],
-        []
+        [PDO::ATTR_PERSISTENT => true]
     );
 });
 
@@ -634,17 +636,9 @@ $app->get('/@{account_name}', function (Request $request, Response $response, $a
     $ps->execute([$user['id']]);
     $comment_count = $ps->fetchColumn();
 
-    // 全投稿IDを使ってcommented_countを集計（JOINより高速）
-    $ps = $db->prepare('SELECT `id` FROM `posts` WHERE `user_id` = ?');
+    $ps = $db->prepare('SELECT COUNT(*) FROM `comments` c JOIN `posts` p ON c.`post_id` = p.`id` WHERE p.`user_id` = ?');
     $ps->execute([$user['id']]);
-    $all_post_ids = $ps->fetchAll(PDO::FETCH_COLUMN);
-    $commented_count = 0;
-    if (!empty($all_post_ids)) {
-        $ph = implode(',', array_fill(0, count($all_post_ids), '?'));
-        $ps = $db->prepare("SELECT COUNT(*) FROM `comments` WHERE `post_id` IN ($ph)");
-        $ps->execute($all_post_ids);
-        $commented_count = $ps->fetchColumn();
-    }
+    $commented_count = $ps->fetchColumn();
 
     $me = $this->get('helper')->get_session_user();
 
