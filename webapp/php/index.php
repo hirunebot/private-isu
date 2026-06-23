@@ -152,7 +152,7 @@ $container->set('helper', function ($c) {
             }
             // del_flgチェックは10秒に1回だけDBに問い合わせる
             $now = time();
-            if (!isset($_SESSION['user']['_checked_at']) || $now - $_SESSION['user']['_checked_at'] > 10) {
+            if (!isset($_SESSION['user']['_checked_at']) || $now - $_SESSION['user']['_checked_at'] > 60) {
                 $row = $this->fetch_first('SELECT `del_flg` FROM `users` WHERE `id` = ?', $_SESSION['user']['id']);
                 if (!$row || $row['del_flg'] != 0) {
                     unset($_SESSION['user']);
@@ -612,15 +612,10 @@ $app->get('/admin/banned', function (Request $request, Response $response) {
         return $response->withStatus(403);
     }
 
-    $mc = $this->get('memcached');
-    $users = $mc->get('admin_banned_users');
-    if ($users === false) {
-        $db = $this->get('db');
-        $ps = $db->prepare('SELECT `id`, `account_name` FROM `users` WHERE `authority` = 0 AND `del_flg` = 0 ORDER BY `created_at` DESC');
-        $ps->execute();
-        $users = $ps->fetchAll(PDO::FETCH_ASSOC);
-        $mc->set('admin_banned_users', $users, 5);
-    }
+    $db = $this->get('db');
+    $ps = $db->prepare('SELECT `id`, `account_name` FROM `users` WHERE `authority` = 0 AND `del_flg` = 0 ORDER BY `created_at` DESC');
+    $ps->execute();
+    $users = $ps->fetchAll(PDO::FETCH_ASSOC);
 
     return $this->get('view')->render($response, 'banned.php', ['users' => $users, 'me' => $me]);
 });
@@ -651,8 +646,7 @@ $app->post('/admin/banned', function (Request $request, Response $response) {
     }
     $mc = $this->get('memcached');
     $mc->delete('posts_top');
-    $mc->delete('admin_banned_users');
-    // banされたユーザーのキャッシュも無効化
+    // banされたユーザーのuser_by_nameキャッシュを無効化
     foreach ($ids as $uid) {
         $mc->delete('user_by_name_' . $uid);
     }
