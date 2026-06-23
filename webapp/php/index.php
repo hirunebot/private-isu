@@ -474,7 +474,6 @@ $app->post('/', function (Request $request, Response $response) {
             return redirect($response, '/', 302);
         }
 
-        $imgdata = file_get_contents($_FILES['file']['tmp_name']);
         $db = $this->get('db');
         $query = 'INSERT INTO `posts` (`user_id`, `mime`, `imgdata`, `body`) VALUES (?,?,?,?)';
         $ps = $db->prepare($query);
@@ -490,7 +489,7 @@ $app->post('/', function (Request $request, Response $response) {
         if (!is_dir($image_dir)) {
             mkdir($image_dir, 0755, true);
         }
-        file_put_contents($image_dir . $pid . '.' . $ext_map[$mime], $imgdata);
+        move_uploaded_file($_FILES['file']['tmp_name'], $image_dir . $pid . '.' . $ext_map[$mime]);
         $mc = $this->get('memcached');
         $mc->delete('posts_top');
         $mc->delete('user_posts_' . $me['id']);
