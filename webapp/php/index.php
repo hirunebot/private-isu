@@ -117,25 +117,13 @@ $container->set('helper', function ($c) {
                 }
                 $db->query($create);
             }
-            // 既存の画像をファイルシステムに書き出す
+            // 画像キャッシュディレクトリをクリア（ファイルはリクエスト時にDBから遅延生成する）
             $image_dir = dirname(dirname(__FILE__)) . '/../public/image/';
             if (is_dir($image_dir)) {
                 array_map('unlink', glob($image_dir . '*') ?: []);
             } else {
                 mkdir($image_dir, 0755, true);
             }
-            $db->setAttribute(PDO::MYSQL_ATTR_USE_BUFFERED_QUERY, false);
-            $ps2 = $db->query('SELECT `id`, `mime`, `imgdata` FROM `posts`');
-            $ps2->setFetchMode(PDO::FETCH_ASSOC);
-            $ext_map = ['image/jpeg' => 'jpg', 'image/png' => 'png', 'image/gif' => 'gif'];
-            while ($img = $ps2->fetch()) {
-                $ext = $ext_map[$img['mime']] ?? null;
-                if ($ext) {
-                    file_put_contents($image_dir . $img['id'] . '.' . $ext, $img['imgdata']);
-                }
-                unset($img);
-            }
-            $db->setAttribute(PDO::MYSQL_ATTR_USE_BUFFERED_QUERY, true);
         }
 
         public function fetch_first($query, ...$params) {
