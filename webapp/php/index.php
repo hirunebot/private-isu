@@ -105,20 +105,11 @@ $container->set('helper', function ($c) {
             foreach($sql as $s) {
                 $db->query($s);
             }
-            // インデックスを作成（存在確認してからDROP→CREATE）
-            $indexes = [
-                ['posts',    'idx_created_at',          'CREATE INDEX `idx_created_at` ON `posts` (`created_at` DESC)'],
-                ['posts',    'idx_user_id_created_at',  'CREATE INDEX `idx_user_id_created_at` ON `posts` (`user_id`, `created_at` DESC)'],
-                ['comments', 'idx_post_id_created_at',  'CREATE INDEX `idx_post_id_created_at` ON `comments` (`post_id`, `created_at`)'],
-                ['comments', 'idx_user_id',             'CREATE INDEX `idx_user_id` ON `comments` (`user_id`)'],
-            ];
-            foreach ($indexes as [$table, $name, $create]) {
-                $exists = $db->query("SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = '{$table}' AND index_name = '{$name}'")->fetchColumn();
-                if ($exists) {
-                    $db->query("ALTER TABLE `{$table}` DROP INDEX `{$name}`");
-                }
-                $db->query($create);
-            }
+            // インデックスを作成（存在しない場合のみ）
+            $db->query('CREATE INDEX IF NOT EXISTS `idx_created_at` ON `posts` (`created_at` DESC)');
+            $db->query('CREATE INDEX IF NOT EXISTS `idx_user_id_created_at` ON `posts` (`user_id`, `created_at` DESC)');
+            $db->query('CREATE INDEX IF NOT EXISTS `idx_post_id_created_at` ON `comments` (`post_id`, `created_at`)');
+            $db->query('CREATE INDEX IF NOT EXISTS `idx_user_id` ON `comments` (`user_id`)');
             // 画像キャッシュディレクトリをクリア（ファイルはリクエスト時にDBから遅延生成する）
             $image_dir = dirname(dirname(__FILE__)) . '/../public/image/';
             if (is_dir($image_dir)) {
@@ -293,8 +284,7 @@ $app->get('/initialize', function (Request $request, Response $response) {
 
 $app->get('/login', function (Request $request, Response $response) {
     if ($this->get('helper')->get_session_user() !== null) {
-        $response->getBody()->write('403');
-        return $response->withStatus(403);
+        return redirect($response, '/', 302);
     }
     return $this->get('view')->render($response, 'login.php', [
         'me' => null,
@@ -496,6 +486,7 @@ $app->post('/', function (Request $request, Response $response) {
         }
         move_uploaded_file($_FILES['file']['tmp_name'], $image_dir . $pid . '.' . $ext_map[$mime]);
         $mc = $this->get('memcached');
+        $mc->set('post_owner_' . $pid, $me['id'], 86400);
         $mc->delete('posts_top');
         $mc->delete('user_posts_' . $me['id']);
         $mc->delete('user_stats_' . $me['id']);
@@ -582,10 +573,18 @@ $app->post('/comment', function (Request $request, Response $response) {
     $mc = $this->get('memcached');
     $mc->delete('posts_top');
     $mc->delete('post_' . $post_id);
-    // コメント先の投稿オーナーのcommented_countキャッシュも無効化
-    $owner = $this->get('helper')->fetch_first('SELECT `user_id` FROM `posts` WHERE `id` = ?', $post_id);
-    if ($owner) {
-        $mc->delete('user_stats_' . $owner['user_id']);
+    // コメント先の投稿オーナーのcommented_countキャッシュも無効化（キャッシュ済みpostからオーナーを取得）
+    $owner_cache_key = 'post_owner_' . $post_id;
+    $owner_user_id = $mc->get($owner_cache_key);
+    if ($owner_user_id === false) {
+        $owner = $this->get('helper')->fetch_first('SELECT `user_id` FROM `posts` WHERE `id` = ?', $post_id);
+        if ($owner) {
+            $owner_user_id = $owner['user_id'];
+            $mc->set($owner_cache_key, $owner_user_id, 86400);
+        }
+    }
+    if ($owner_user_id) {
+        $mc->delete('user_stats_' . $owner_user_id);
     }
     $mc->delete('user_stats_' . $me['id']);
 
@@ -604,10 +603,15 @@ $app->get('/admin/banned', function (Request $request, Response $response) {
         return $response->withStatus(403);
     }
 
-    $db = $this->get('db');
-    $ps = $db->prepare('SELECT `id`, `account_name` FROM `users` WHERE `authority` = 0 AND `del_flg` = 0 ORDER BY `created_at` DESC');
-    $ps->execute();
-    $users = $ps->fetchAll(PDO::FETCH_ASSOC);
+    $mc = $this->get('memcached');
+    $users = $mc->get('admin_banned_users');
+    if ($users === false) {
+        $db = $this->get('db');
+        $ps = $db->prepare('SELECT `id`, `account_name` FROM `users` WHERE `authority` = 0 AND `del_flg` = 0 ORDER BY `created_at` DESC');
+        $ps->execute();
+        $users = $ps->fetchAll(PDO::FETCH_ASSOC);
+        $mc->set('admin_banned_users', $users, 5);
+    }
 
     return $this->get('view')->render($response, 'banned.php', ['users' => $users, 'me' => $me]);
 });
@@ -636,7 +640,13 @@ $app->post('/admin/banned', function (Request $request, Response $response) {
         $ph = implode(',', array_fill(0, count($ids), '?'));
         $db->prepare("UPDATE `users` SET `del_flg` = 1 WHERE `id` IN ($ph)")->execute($ids);
     }
-    $this->get('memcached')->delete('posts_top');
+    $mc = $this->get('memcached');
+    $mc->delete('posts_top');
+    $mc->delete('admin_banned_users');
+    // banされたユーザーのキャッシュも無効化
+    foreach ($ids as $uid) {
+        $mc->delete('user_by_name_' . $uid);
+    }
 
     return redirect($response, '/admin/banned', 302);
 });
