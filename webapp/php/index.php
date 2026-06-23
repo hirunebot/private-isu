@@ -382,7 +382,7 @@ $app->get('/', function (Request $request, Response $response) {
         $ps->execute();
         $results = $ps->fetchAll(PDO::FETCH_ASSOC);
         $posts = $this->get('helper')->make_posts($results);
-        $mc->set('posts_top', $posts, 30);
+        $mc->set('posts_top', $posts, 5);
     }
 
     return $this->get('view')->render($response, 'index.php', [
@@ -412,7 +412,7 @@ $app->get('/posts', function (Request $request, Response $response) {
         }
         $results = $ps->fetchAll(PDO::FETCH_ASSOC);
         $posts = $this->get('helper')->make_posts($results);
-        $mc->set($cache_key, $posts, 30);
+        $mc->set($cache_key, $posts, 5);
     }
 
     return $this->get('view')->render($response, 'posts.php', ['posts' => $posts]);
