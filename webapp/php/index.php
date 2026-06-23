@@ -96,7 +96,7 @@ $container->set('helper', function ($c) {
             foreach($sql as $s) {
                 $db->query($s);
             }
-            // インデックスを DROP してから CREATE（IF NOT EXISTS は古いMySQLで非対応のため）
+            // インデックスを作成（存在確認してからDROP→CREATE）
             $indexes = [
                 ['posts',    'idx_created_at',          'CREATE INDEX `idx_created_at` ON `posts` (`created_at` DESC)'],
                 ['posts',    'idx_user_id_created_at',  'CREATE INDEX `idx_user_id_created_at` ON `posts` (`user_id`, `created_at` DESC)'],
@@ -104,7 +104,10 @@ $container->set('helper', function ($c) {
                 ['comments', 'idx_user_id',             'CREATE INDEX `idx_user_id` ON `comments` (`user_id`)'],
             ];
             foreach ($indexes as [$table, $name, $create]) {
-                $db->query("ALTER TABLE `{$table}` DROP INDEX IF EXISTS `{$name}`");
+                $exists = $db->query("SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = '{$table}' AND index_name = '{$name}'")->fetchColumn();
+                if ($exists) {
+                    $db->query("ALTER TABLE `{$table}` DROP INDEX `{$name}`");
+                }
                 $db->query($create);
             }
             // 既存の画像をファイルシステムに書き出す
