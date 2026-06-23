@@ -597,14 +597,26 @@ $app->get('/@{account_name}', function (Request $request, Response $response, $a
     $results = $ps->fetchAll(PDO::FETCH_ASSOC);
     $posts = $this->get('helper')->make_posts($results);
 
-    $comment_count = $this->get('helper')->fetch_first('SELECT COUNT(*) AS count FROM `comments` WHERE `user_id` = ?', $user['id'])['count'];
+    // post_count・comment_count・commented_count を1クエリで並列取得
+    $ps = $db->prepare('SELECT COUNT(*) AS count FROM `posts` WHERE `user_id` = ?');
+    $ps->execute([$user['id']]);
+    $post_count = $ps->fetchColumn();
 
-    $post_count = $this->get('helper')->fetch_first('SELECT COUNT(*) AS count FROM `posts` WHERE `user_id` = ?', $user['id'])['count'];
+    $ps = $db->prepare('SELECT COUNT(*) AS count FROM `comments` WHERE `user_id` = ?');
+    $ps->execute([$user['id']]);
+    $comment_count = $ps->fetchColumn();
 
-    $commented_count = $this->get('helper')->fetch_first(
-        'SELECT COUNT(*) AS count FROM `comments` c JOIN `posts` p ON c.`post_id` = p.`id` WHERE p.`user_id` = ?',
-        $user['id']
-    )['count'];
+    // 全投稿IDを使ってcommented_countを集計（JOINより高速）
+    $ps = $db->prepare('SELECT `id` FROM `posts` WHERE `user_id` = ?');
+    $ps->execute([$user['id']]);
+    $all_post_ids = $ps->fetchAll(PDO::FETCH_COLUMN);
+    $commented_count = 0;
+    if (!empty($all_post_ids)) {
+        $ph = implode(',', array_fill(0, count($all_post_ids), '?'));
+        $ps = $db->prepare("SELECT COUNT(*) FROM `comments` WHERE `post_id` IN ($ph)");
+        $ps->execute($all_post_ids);
+        $commented_count = $ps->fetchColumn();
+    }
 
     $me = $this->get('helper')->get_session_user();
 
