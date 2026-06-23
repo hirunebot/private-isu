@@ -42,7 +42,7 @@ $container->set('settings', function() {
     return [
         'public_folder' => dirname(dirname(__FILE__)) . '/public',
         'db' => [
-            'host' => $_SERVER['ISUCONP_DB_HOST'] ?? 'localhost',
+            'host' => $_SERVER['ISUCONP_DB_HOST'] ?? '127.0.0.1',
             'port' => $_SERVER['ISUCONP_DB_PORT'] ?? 3306,
             'username' => $_SERVER['ISUCONP_DB_USER'] ?? 'root',
             'password' => $_SERVER['ISUCONP_DB_PASSWORD'] ?? null,
