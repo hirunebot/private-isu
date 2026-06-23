@@ -313,6 +313,7 @@ $app->post('/login', function (Request $request, Response $response) {
     if ($user) {
         $_SESSION['user'] = $user;
         $_SESSION['csrf_token'] = bin2hex(random_bytes(16));
+        session_write_close();
         return redirect($response, '/', 302);
     } else {
         $this->get('flash')->addMessage('notice', 'アカウント名かパスワードが間違っています');
@@ -362,6 +363,7 @@ $app->post('/register', function (Request $request, Response $response) {
     $new_user = $this->get('helper')->fetch_first('SELECT `id`, `account_name`, `authority`, `del_flg`, `created_at` FROM `users` WHERE `id` = ?', $new_id);
     $_SESSION['user'] = $new_user;
     $_SESSION['csrf_token'] = bin2hex(random_bytes(16));
+    session_write_close();
     return redirect($response, '/', 302);
 });
 
@@ -643,7 +645,13 @@ $app->get('/@{account_name}', function (Request $request, Response $response, $a
     $db = $this->get('db');
     $mc = $this->get('memcached');
 
-    $user = $this->get('helper')->fetch_first('SELECT `id`, `account_name`, `authority`, `del_flg`, `created_at` FROM `users` WHERE `account_name` = ? AND `del_flg` = 0', $args['account_name']);
+    $user = $mc->get('user_by_name_' . $args['account_name']);
+    if ($user === false) {
+        $user = $this->get('helper')->fetch_first('SELECT `id`, `account_name`, `authority`, `del_flg`, `created_at` FROM `users` WHERE `account_name` = ? AND `del_flg` = 0', $args['account_name']);
+        if ($user !== false) {
+            $mc->set('user_by_name_' . $args['account_name'], $user, 60);
+        }
+    }
 
     if ($user === false) {
         $response->getBody()->write('404');
@@ -656,7 +664,7 @@ $app->get('/@{account_name}', function (Request $request, Response $response, $a
         $ps->execute([$user['id']]);
         $results = $ps->fetchAll(PDO::FETCH_ASSOC);
         $posts = $this->get('helper')->make_posts($results);
-        $mc->set('user_posts_' . $user['id'], $posts, 5);
+        $mc->set('user_posts_' . $user['id'], $posts, 60);
     }
 
     $stats = $mc->get('user_stats_' . $user['id']);
@@ -669,7 +677,7 @@ $app->get('/@{account_name}', function (Request $request, Response $response, $a
         ');
         $ps->execute([$user['id'], $user['id'], $user['id']]);
         $stats = $ps->fetch(PDO::FETCH_ASSOC);
-        $mc->set('user_stats_' . $user['id'], $stats, 5);
+        $mc->set('user_stats_' . $user['id'], $stats, 60);
     }
 
     $me = $this->get('helper')->get_session_user();
