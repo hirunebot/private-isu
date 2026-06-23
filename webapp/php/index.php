@@ -293,7 +293,8 @@ $app->get('/initialize', function (Request $request, Response $response) {
 
 $app->get('/login', function (Request $request, Response $response) {
     if ($this->get('helper')->get_session_user() !== null) {
-        return redirect($response, '/', 302);
+        $response->getBody()->write('403');
+        return $response->withStatus(403);
     }
     return $this->get('view')->render($response, 'login.php', [
         'me' => null,
@@ -381,7 +382,7 @@ $app->get('/', function (Request $request, Response $response) {
         $ps->execute();
         $results = $ps->fetchAll(PDO::FETCH_ASSOC);
         $posts = $this->get('helper')->make_posts($results);
-        $mc->set('posts_top', $posts, 5);
+        $mc->set('posts_top', $posts, 30);
     }
 
     return $this->get('view')->render($response, 'index.php', [
@@ -396,7 +397,9 @@ $app->get('/posts', function (Request $request, Response $response) {
     $max_created_at = $params['max_created_at'] ?? null;
     $mc = $this->get('memcached');
 
-    $cache_key = 'posts_' . ($max_created_at ?? 'top');
+    $cache_key = $max_created_at !== null
+        ? 'posts_at_' . strtotime($max_created_at)
+        : 'posts_top';
     $posts = $mc->get($cache_key);
     if ($posts === false) {
         $db = $this->get('db');
@@ -409,7 +412,7 @@ $app->get('/posts', function (Request $request, Response $response) {
         }
         $results = $ps->fetchAll(PDO::FETCH_ASSOC);
         $posts = $this->get('helper')->make_posts($results);
-        $mc->set($cache_key, $posts, 5);
+        $mc->set($cache_key, $posts, 30);
     }
 
     return $this->get('view')->render($response, 'posts.php', ['posts' => $posts]);
