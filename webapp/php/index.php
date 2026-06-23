@@ -152,7 +152,7 @@ $container->set('helper', function ($c) {
             }
             // del_flgチェックは10秒に1回だけDBに問い合わせる
             $now = time();
-            if (!isset($_SESSION['user']['_checked_at']) || $now - $_SESSION['user']['_checked_at'] > 60) {
+            if (!isset($_SESSION['user']['_checked_at']) || $now - $_SESSION['user']['_checked_at'] > 10) {
                 $row = $this->fetch_first('SELECT `del_flg` FROM `users` WHERE `id` = ?', $_SESSION['user']['id']);
                 if (!$row || $row['del_flg'] != 0) {
                     unset($_SESSION['user']);
@@ -293,7 +293,8 @@ $app->get('/initialize', function (Request $request, Response $response) {
 
 $app->get('/login', function (Request $request, Response $response) {
     if ($this->get('helper')->get_session_user() !== null) {
-        return redirect($response, '/', 302);
+        $response->getBody()->write('403');
+        return $response->withStatus(403);
     }
     return $this->get('view')->render($response, 'login.php', [
         'me' => null,
@@ -495,7 +496,6 @@ $app->post('/', function (Request $request, Response $response) {
         }
         move_uploaded_file($_FILES['file']['tmp_name'], $image_dir . $pid . '.' . $ext_map[$mime]);
         $mc = $this->get('memcached');
-        $mc->set('post_owner_' . $pid, $me['id'], 86400);
         $mc->delete('posts_top');
         $mc->delete('user_posts_' . $me['id']);
         $mc->delete('user_stats_' . $me['id']);
@@ -582,18 +582,10 @@ $app->post('/comment', function (Request $request, Response $response) {
     $mc = $this->get('memcached');
     $mc->delete('posts_top');
     $mc->delete('post_' . $post_id);
-    // コメント先の投稿オーナーのcommented_countキャッシュも無効化（キャッシュ済みpostからオーナーを取得）
-    $owner_cache_key = 'post_owner_' . $post_id;
-    $owner_user_id = $mc->get($owner_cache_key);
-    if ($owner_user_id === false) {
-        $owner = $this->get('helper')->fetch_first('SELECT `user_id` FROM `posts` WHERE `id` = ?', $post_id);
-        if ($owner) {
-            $owner_user_id = $owner['user_id'];
-            $mc->set($owner_cache_key, $owner_user_id, 86400);
-        }
-    }
-    if ($owner_user_id) {
-        $mc->delete('user_stats_' . $owner_user_id);
+    // コメント先の投稿オーナーのcommented_countキャッシュも無効化
+    $owner = $this->get('helper')->fetch_first('SELECT `user_id` FROM `posts` WHERE `id` = ?', $post_id);
+    if ($owner) {
+        $mc->delete('user_stats_' . $owner['user_id']);
     }
     $mc->delete('user_stats_' . $me['id']);
 
@@ -644,12 +636,7 @@ $app->post('/admin/banned', function (Request $request, Response $response) {
         $ph = implode(',', array_fill(0, count($ids), '?'));
         $db->prepare("UPDATE `users` SET `del_flg` = 1 WHERE `id` IN ($ph)")->execute($ids);
     }
-    $mc = $this->get('memcached');
-    $mc->delete('posts_top');
-    // banされたユーザーのuser_by_nameキャッシュを無効化
-    foreach ($ids as $uid) {
-        $mc->delete('user_by_name_' . $uid);
-    }
+    $this->get('memcached')->delete('posts_top');
 
     return redirect($response, '/admin/banned', 302);
 });
