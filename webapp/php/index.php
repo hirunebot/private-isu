@@ -50,6 +50,13 @@ $container->set('settings', function() {
         ],
     ];
 });
+$container->set('memcached', function () use ($memd_addr) {
+    $mc = new Memcached();
+    [$host, $port] = explode(':', $memd_addr);
+    $mc->addServer($host, (int)$port);
+    return $mc;
+});
+
 $container->set('db', function ($c) {
     $config = $c->get('settings');
     return new PDO(
@@ -290,6 +297,7 @@ function calculate_passhash($account_name, $password) {
 
 $app->get('/initialize', function (Request $request, Response $response) {
     $this->get('helper')->db_initialize();
+    $this->get('memcached')->flush();
     return $response;
 });
 
@@ -375,11 +383,16 @@ $app->get('/logout', function (Request $request, Response $response) {
 $app->get('/', function (Request $request, Response $response) {
     $me = $this->get('helper')->get_session_user();
 
-    $db = $this->get('db');
-    $ps = $db->prepare('SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` ORDER BY `created_at` DESC LIMIT 30');
-    $ps->execute();
-    $results = $ps->fetchAll(PDO::FETCH_ASSOC);
-    $posts = $this->get('helper')->make_posts($results);
+    $mc = $this->get('memcached');
+    $posts = $mc->get('posts_top');
+    if ($posts === false) {
+        $db = $this->get('db');
+        $ps = $db->prepare('SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` ORDER BY `created_at` DESC LIMIT 30');
+        $ps->execute();
+        $results = $ps->fetchAll(PDO::FETCH_ASSOC);
+        $posts = $this->get('helper')->make_posts($results);
+        $mc->set('posts_top', $posts, 5);
+    }
 
     return $this->get('view')->render($response, 'index.php', [
         'posts' => $posts,
@@ -391,16 +404,23 @@ $app->get('/', function (Request $request, Response $response) {
 $app->get('/posts', function (Request $request, Response $response) {
     $params = $request->getQueryParams();
     $max_created_at = $params['max_created_at'] ?? null;
-    $db = $this->get('db');
-    if ($max_created_at === null) {
-        $ps = $db->prepare('SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` ORDER BY `created_at` DESC LIMIT 30');
-        $ps->execute();
-    } else {
-        $ps = $db->prepare('SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `created_at` <= ? ORDER BY `created_at` DESC LIMIT 30');
-        $ps->execute([$max_created_at]);
+    $mc = $this->get('memcached');
+
+    $cache_key = 'posts_' . ($max_created_at ?? 'top');
+    $posts = $mc->get($cache_key);
+    if ($posts === false) {
+        $db = $this->get('db');
+        if ($max_created_at === null) {
+            $ps = $db->prepare('SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` ORDER BY `created_at` DESC LIMIT 30');
+            $ps->execute();
+        } else {
+            $ps = $db->prepare('SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `created_at` <= ? ORDER BY `created_at` DESC LIMIT 30');
+            $ps->execute([$max_created_at]);
+        }
+        $results = $ps->fetchAll(PDO::FETCH_ASSOC);
+        $posts = $this->get('helper')->make_posts($results);
+        $mc->set($cache_key, $posts, 5);
     }
-    $results = $ps->fetchAll(PDO::FETCH_ASSOC);
-    $posts = $this->get('helper')->make_posts($results);
 
     return $this->get('view')->render($response, 'posts.php', ['posts' => $posts]);
 });
@@ -473,6 +493,7 @@ $app->post('/', function (Request $request, Response $response) {
             mkdir($image_dir, 0755, true);
         }
         file_put_contents($image_dir . $pid . '.' . $ext_map[$mime], $imgdata);
+        $this->get('memcached')->delete('posts_top');
         return redirect($response, "/posts/{$pid}", 302);
     } else {
         $this->get('flash')->addMessage('notice', '画像が必須です');
