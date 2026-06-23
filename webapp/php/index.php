@@ -117,6 +117,7 @@ $container->set('helper', function ($c) {
             } else {
                 mkdir($image_dir, 0755, true);
             }
+            $db->setAttribute(PDO::MYSQL_ATTR_USE_BUFFERED_QUERY, false);
             $ps2 = $db->query('SELECT `id`, `mime`, `imgdata` FROM `posts`');
             $ps2->setFetchMode(PDO::FETCH_ASSOC);
             $ext_map = ['image/jpeg' => 'jpg', 'image/png' => 'png', 'image/gif' => 'gif'];
@@ -127,6 +128,7 @@ $container->set('helper', function ($c) {
                 }
                 unset($img);
             }
+            $db->setAttribute(PDO::MYSQL_ATTR_USE_BUFFERED_QUERY, true);
         }
 
         public function fetch_first($query, ...$params) {
