@@ -92,8 +92,25 @@ $container->set('helper', function ($c) {
             $sql[] = 'DELETE FROM comments WHERE id > 100000';
             $sql[] = 'UPDATE users SET del_flg = 0';
             $sql[] = 'UPDATE users SET del_flg = 1 WHERE id % 50 = 0';
+            $sql[] = 'CREATE INDEX IF NOT EXISTS `idx_created_at` ON `posts` (`created_at` DESC)';
+            $sql[] = 'CREATE INDEX IF NOT EXISTS `idx_user_id_created_at` ON `posts` (`user_id`, `created_at` DESC)';
+            $sql[] = 'CREATE INDEX IF NOT EXISTS `idx_post_id_created_at` ON `comments` (`post_id`, `created_at`)';
+            $sql[] = 'CREATE INDEX IF NOT EXISTS `idx_user_id` ON `comments` (`user_id`)';
             foreach($sql as $s) {
                 $db->query($s);
+            }
+            // 既存の画像をファイルシステムに書き出す
+            $image_dir = dirname(dirname(__FILE__)) . '/../public/image/';
+            if (!is_dir($image_dir)) {
+                mkdir($image_dir, 0755, true);
+            }
+            $ps2 = $db->query('SELECT `id`, `mime`, `imgdata` FROM `posts`');
+            $ext_map = ['image/jpeg' => 'jpg', 'image/png' => 'png', 'image/gif' => 'gif'];
+            foreach ($ps2->fetchAll(PDO::FETCH_ASSOC) as $img) {
+                $ext = $ext_map[$img['mime']] ?? null;
+                if ($ext) {
+                    file_put_contents($image_dir . $img['id'] . '.' . $ext, $img['imgdata']);
+                }
             }
         }
 
@@ -118,12 +135,21 @@ $container->set('helper', function ($c) {
         }
 
         public function get_session_user() {
-            if (!isset($_SESSION['user'], $_SESSION['user']['id'])) {
+            if (!isset($_SESSION['user']['id'])) {
                 return null;
             }
-
+            if (isset($_SESSION['user']['account_name'])) {
+                $row = $this->fetch_first('SELECT `del_flg` FROM `users` WHERE `id` = ?', $_SESSION['user']['id']);
+                if (!$row || $row['del_flg'] != 0) {
+                    unset($_SESSION['user']);
+                    return null;
+                }
+                return $_SESSION['user'];
+            }
             $user = $this->fetch_first('SELECT * FROM `users` WHERE `id` = ?', $_SESSION['user']['id']);
-
+            if ($user) {
+                $_SESSION['user'] = $user;
+            }
             return $user ?: null;
         }
 
@@ -236,9 +262,7 @@ function validate_user($account_name, $password) {
 }
 
 function digest($src) {
-    // opensslのバージョンによっては (stdin)= というのがつくので取る
-    $src = escapeshellarg($src);
-    return trim(`printf "%s" {$src} | openssl dgst -sha512 | sed 's/^.*= //'`);
+    return hash('sha512', $src);
 }
 
 function calculate_salt($account_name) {
@@ -277,9 +301,7 @@ $app->post('/login', function (Request $request, Response $response) {
     $user = $this->get('helper')->try_login($params['account_name'], $params['password']);
 
     if ($user) {
-        $_SESSION['user'] = [
-            'id' => $user['id'],
-        ];
+        $_SESSION['user'] = $user;
         $_SESSION['csrf_token'] = bin2hex(random_bytes(16));
         return redirect($response, '/', 302);
     } else {
@@ -326,9 +348,9 @@ $app->post('/register', function (Request $request, Response $response) {
         $account_name,
         calculate_passhash($account_name, $password)
     ]);
-    $_SESSION['user'] = [
-        'id' => $db->lastInsertId(),
-    ];
+    $new_id = $db->lastInsertId();
+    $new_user = $this->get('helper')->fetch_first('SELECT * FROM `users` WHERE `id` = ?', $new_id);
+    $_SESSION['user'] = $new_user;
     $_SESSION['csrf_token'] = bin2hex(random_bytes(16));
     return redirect($response, '/', 302);
 });
@@ -433,6 +455,9 @@ $app->post('/', function (Request $request, Response $response) {
           $params['body'],
         ]);
         $pid = $db->lastInsertId();
+        $image_dir = dirname(dirname(__FILE__)) . '/../public/image/';
+        $ext_map = ['image/jpeg' => 'jpg', 'image/png' => 'png', 'image/gif' => 'gif'];
+        file_put_contents($image_dir . $pid . '.' . $ext_map[$mime], file_get_contents($_FILES['file']['tmp_name']));
         return redirect($response, "/posts/{$pid}", 302);
     } else {
         $this->get('flash')->addMessage('notice', '画像が必須です');
@@ -445,13 +470,30 @@ $app->get('/image/{id}.{ext}', function (Request $request, Response $response, $
         return $response;
     }
 
+    $image_dir = dirname(dirname(__FILE__)) . '/../public/image/';
+    $file = $image_dir . $args['id'] . '.' . $args['ext'];
+    if (file_exists($file)) {
+        $mime_map = ['jpg' => 'image/jpeg', 'png' => 'image/png', 'gif' => 'image/gif'];
+        $mime = $mime_map[$args['ext']] ?? null;
+        if ($mime === null) {
+            $response->getBody()->write('404');
+            return $response->withStatus(404);
+        }
+        $response->getBody()->write(file_get_contents($file));
+        return $response
+            ->withHeader('Content-Type', $mime)
+            ->withHeader('Cache-Control', 'max-age=86400, public');
+    }
+
     $post = $this->get('helper')->fetch_first('SELECT * FROM `posts` WHERE `id` = ?', $args['id']);
 
     if (($args['ext'] == 'jpg' && $post['mime'] == 'image/jpeg') ||
         ($args['ext'] == 'png' && $post['mime'] == 'image/png') ||
         ($args['ext'] == 'gif' && $post['mime'] == 'image/gif')) {
         $response->getBody()->write($post['imgdata']);
-        return $response->withHeader('Content-Type', $post['mime']);
+        return $response
+            ->withHeader('Content-Type', $post['mime'])
+            ->withHeader('Cache-Control', 'max-age=86400, public');
     }
     $response->getBody()->write('404');
     return $response->withStatus(404);
