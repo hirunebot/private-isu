@@ -93,12 +93,19 @@ $container->set('helper', function ($c) {
             $sql[] = 'DELETE FROM comments WHERE id > 100000';
             $sql[] = 'UPDATE users SET del_flg = 0';
             $sql[] = 'UPDATE users SET del_flg = 1 WHERE id % 50 = 0';
-            $sql[] = 'CREATE INDEX IF NOT EXISTS `idx_created_at` ON `posts` (`created_at` DESC)';
-            $sql[] = 'CREATE INDEX IF NOT EXISTS `idx_user_id_created_at` ON `posts` (`user_id`, `created_at` DESC)';
-            $sql[] = 'CREATE INDEX IF NOT EXISTS `idx_post_id_created_at` ON `comments` (`post_id`, `created_at`)';
-            $sql[] = 'CREATE INDEX IF NOT EXISTS `idx_user_id` ON `comments` (`user_id`)';
             foreach($sql as $s) {
                 $db->query($s);
+            }
+            // インデックスを DROP してから CREATE（IF NOT EXISTS は古いMySQLで非対応のため）
+            $indexes = [
+                ['posts',    'idx_created_at',          'CREATE INDEX `idx_created_at` ON `posts` (`created_at` DESC)'],
+                ['posts',    'idx_user_id_created_at',  'CREATE INDEX `idx_user_id_created_at` ON `posts` (`user_id`, `created_at` DESC)'],
+                ['comments', 'idx_post_id_created_at',  'CREATE INDEX `idx_post_id_created_at` ON `comments` (`post_id`, `created_at`)'],
+                ['comments', 'idx_user_id',             'CREATE INDEX `idx_user_id` ON `comments` (`user_id`)'],
+            ];
+            foreach ($indexes as [$table, $name, $create]) {
+                $db->query("ALTER TABLE `{$table}` DROP INDEX IF EXISTS `{$name}`");
+                $db->query($create);
             }
             // 既存の画像をファイルシステムに書き出す
             $image_dir = dirname(dirname(__FILE__)) . '/../public/image/';
