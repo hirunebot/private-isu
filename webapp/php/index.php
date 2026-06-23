@@ -153,10 +153,15 @@ $container->set('helper', function ($c) {
             if (!isset($_SESSION['user']['id'])) {
                 return null;
             }
-            $row = $this->fetch_first('SELECT `del_flg` FROM `users` WHERE `id` = ?', $_SESSION['user']['id']);
-            if (!$row || $row['del_flg'] != 0) {
-                unset($_SESSION['user']);
-                return null;
+            // del_flgチェックは10秒に1回だけDBに問い合わせる
+            $now = time();
+            if (!isset($_SESSION['user']['_checked_at']) || $now - $_SESSION['user']['_checked_at'] > 10) {
+                $row = $this->fetch_first('SELECT `del_flg` FROM `users` WHERE `id` = ?', $_SESSION['user']['id']);
+                if (!$row || $row['del_flg'] != 0) {
+                    unset($_SESSION['user']);
+                    return null;
+                }
+                $_SESSION['user']['_checked_at'] = $now;
             }
             return $_SESSION['user'];
         }
