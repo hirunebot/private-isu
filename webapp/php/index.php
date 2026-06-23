@@ -416,11 +416,19 @@ $app->get('/posts', function (Request $request, Response $response) {
 });
 
 $app->get('/posts/{id}', function (Request $request, Response $response, $args) {
-    $db = $this->get('db');
-    $ps = $db->prepare('SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `id` = ?');
-    $ps->execute([$args['id']]);
-    $results = $ps->fetchAll(PDO::FETCH_ASSOC);
-    $posts = $this->get('helper')->make_posts($results, ['all_comments' => true]);
+    $mc = $this->get('memcached');
+    $cache_key = 'post_' . $args['id'];
+    $posts = $mc->get($cache_key);
+    if ($posts === false) {
+        $db = $this->get('db');
+        $ps = $db->prepare('SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `id` = ?');
+        $ps->execute([$args['id']]);
+        $results = $ps->fetchAll(PDO::FETCH_ASSOC);
+        $posts = $this->get('helper')->make_posts($results, ['all_comments' => true]);
+        if (count($posts) > 0) {
+            $mc->set($cache_key, $posts, 10);
+        }
+    }
 
     if (count($posts) == 0) {
         $response->getBody()->write('404');
@@ -483,7 +491,10 @@ $app->post('/', function (Request $request, Response $response) {
             mkdir($image_dir, 0755, true);
         }
         file_put_contents($image_dir . $pid . '.' . $ext_map[$mime], $imgdata);
-        $this->get('memcached')->delete('posts_top');
+        $mc = $this->get('memcached');
+        $mc->delete('posts_top');
+        $mc->delete('user_posts_' . $me['id']);
+        $mc->delete('user_stats_' . $me['id']);
         return redirect($response, "/posts/{$pid}", 302);
     } else {
         $this->get('flash')->addMessage('notice', '画像が必須です');
@@ -498,15 +509,17 @@ $app->get('/image/{id}.{ext}', function (Request $request, Response $response, $
 
     $image_dir = dirname(dirname(__FILE__)) . '/../public/image/';
     $file = $image_dir . $args['id'] . '.' . $args['ext'];
+    $mime_map = ['jpg' => 'image/jpeg', 'png' => 'image/png', 'gif' => 'image/gif'];
+    $mime = $mime_map[$args['ext']] ?? null;
+    if ($mime === null) {
+        $response->getBody()->write('404');
+        return $response->withStatus(404);
+    }
+
     if (file_exists($file)) {
-        $mime_map = ['jpg' => 'image/jpeg', 'png' => 'image/png', 'gif' => 'image/gif'];
-        $mime = $mime_map[$args['ext']] ?? null;
-        if ($mime === null) {
-            $response->getBody()->write('404');
-            return $response->withStatus(404);
-        }
-        $response->getBody()->write(file_get_contents($file));
+        $stream = new \Slim\Psr7\Stream(fopen($file, 'rb'));
         return $response
+            ->withBody($stream)
             ->withHeader('Content-Type', $mime)
             ->withHeader('Cache-Control', 'max-age=86400, public');
     }
@@ -518,21 +531,20 @@ $app->get('/image/{id}.{ext}', function (Request $request, Response $response, $
         return $response->withStatus(404);
     }
 
-    if (($args['ext'] == 'jpg' && $post['mime'] == 'image/jpeg') ||
-        ($args['ext'] == 'png' && $post['mime'] == 'image/png') ||
-        ($args['ext'] == 'gif' && $post['mime'] == 'image/gif')) {
-        // ファイルシステムに保存して以降はnginxが直接返せるようにする
-        if (!is_dir($image_dir)) {
-            mkdir($image_dir, 0755, true);
-        }
-        file_put_contents($file, $post['imgdata']);
-        $response->getBody()->write($post['imgdata']);
-        return $response
-            ->withHeader('Content-Type', $post['mime'])
-            ->withHeader('Cache-Control', 'max-age=86400, public');
+    if ($post['mime'] !== $mime) {
+        $response->getBody()->write('404');
+        return $response->withStatus(404);
     }
-    $response->getBody()->write('404');
-    return $response->withStatus(404);
+
+    if (!is_dir($image_dir)) {
+        mkdir($image_dir, 0755, true);
+    }
+    file_put_contents($file, $post['imgdata']);
+    $stream = new \Slim\Psr7\Stream(fopen($file, 'rb'));
+    return $response
+        ->withBody($stream)
+        ->withHeader('Content-Type', $post['mime'])
+        ->withHeader('Cache-Control', 'max-age=86400, public');
 });
 
 $app->post('/comment', function (Request $request, Response $response) {
@@ -554,13 +566,24 @@ $app->post('/comment', function (Request $request, Response $response) {
     }
     $post_id = $params['post_id'];
 
+    $db = $this->get('db');
     $query = 'INSERT INTO `comments` (`post_id`, `user_id`, `comment`) VALUES (?,?,?)';
-    $ps = $this->get('db')->prepare($query);
+    $ps = $db->prepare($query);
     $ps->execute([
         $post_id,
         $me['id'],
         $params['comment']
     ]);
+
+    $mc = $this->get('memcached');
+    $mc->delete('posts_top');
+    $mc->delete('post_' . $post_id);
+    // コメント先の投稿オーナーのcommented_countキャッシュも無効化
+    $owner = $this->get('helper')->fetch_first('SELECT `user_id` FROM `posts` WHERE `id` = ?', $post_id);
+    if ($owner) {
+        $mc->delete('user_stats_' . $owner['user_id']);
+    }
+    $mc->delete('user_stats_' . $me['id']);
 
     return redirect($response, "/posts/{$post_id}", 302);
 });
@@ -604,17 +627,20 @@ $app->post('/admin/banned', function (Request $request, Response $response) {
     }
 
     $db = $this->get('db');
-    $query = 'UPDATE `users` SET `del_flg` = ? WHERE `id` = ?';
-    $ps = $db->prepare($query);
-    foreach ($params['uid'] as $id) {
-        $ps->execute([1, $id]);
+    $ids = array_values(array_filter($params['uid'] ?? [], fn($id) => preg_match('/\A[0-9]+\z/', (string)$id)));
+    if (!empty($ids)) {
+        $ph = implode(',', array_fill(0, count($ids), '?'));
+        $db->prepare("UPDATE `users` SET `del_flg` = 1 WHERE `id` IN ($ph)")->execute($ids);
     }
+    $this->get('memcached')->delete('posts_top');
 
     return redirect($response, '/admin/banned', 302);
 });
 
 $app->get('/@{account_name}', function (Request $request, Response $response, $args) {
     $db = $this->get('db');
+    $mc = $this->get('memcached');
+
     $user = $this->get('helper')->fetch_first('SELECT `id`, `account_name`, `authority`, `del_flg`, `created_at` FROM `users` WHERE `account_name` = ? AND `del_flg` = 0', $args['account_name']);
 
     if ($user === false) {
@@ -622,27 +648,38 @@ $app->get('/@{account_name}', function (Request $request, Response $response, $a
         return $response->withStatus(404);
     }
 
-    $ps = $db->prepare('SELECT p.`id`, p.`user_id`, p.`body`, p.`created_at`, p.`mime` FROM `posts` p JOIN `users` u ON p.`user_id` = u.`id` WHERE p.`user_id` = ? AND u.`del_flg` = 0 ORDER BY p.`created_at` DESC LIMIT 20');
-    $ps->execute([$user['id']]);
-    $results = $ps->fetchAll(PDO::FETCH_ASSOC);
-    $posts = $this->get('helper')->make_posts($results);
+    $posts = $mc->get('user_posts_' . $user['id']);
+    if ($posts === false) {
+        $ps = $db->prepare('SELECT p.`id`, p.`user_id`, p.`body`, p.`created_at`, p.`mime` FROM `posts` p JOIN `users` u ON p.`user_id` = u.`id` WHERE p.`user_id` = ? AND u.`del_flg` = 0 ORDER BY p.`created_at` DESC LIMIT 20');
+        $ps->execute([$user['id']]);
+        $results = $ps->fetchAll(PDO::FETCH_ASSOC);
+        $posts = $this->get('helper')->make_posts($results);
+        $mc->set('user_posts_' . $user['id'], $posts, 5);
+    }
 
-    // post_count・comment_count・commented_count を1クエリで並列取得
-    $ps = $db->prepare('SELECT COUNT(*) AS count FROM `posts` WHERE `user_id` = ?');
-    $ps->execute([$user['id']]);
-    $post_count = $ps->fetchColumn();
-
-    $ps = $db->prepare('SELECT COUNT(*) AS count FROM `comments` WHERE `user_id` = ?');
-    $ps->execute([$user['id']]);
-    $comment_count = $ps->fetchColumn();
-
-    $ps = $db->prepare('SELECT COUNT(*) FROM `comments` c JOIN `posts` p ON c.`post_id` = p.`id` WHERE p.`user_id` = ?');
-    $ps->execute([$user['id']]);
-    $commented_count = $ps->fetchColumn();
+    $stats = $mc->get('user_stats_' . $user['id']);
+    if ($stats === false) {
+        $ps = $db->prepare('
+            SELECT
+                (SELECT COUNT(*) FROM `posts` WHERE `user_id` = ?) AS post_count,
+                (SELECT COUNT(*) FROM `comments` WHERE `user_id` = ?) AS comment_count,
+                (SELECT COUNT(*) FROM `comments` c JOIN `posts` p ON c.`post_id` = p.`id` WHERE p.`user_id` = ?) AS commented_count
+        ');
+        $ps->execute([$user['id'], $user['id'], $user['id']]);
+        $stats = $ps->fetch(PDO::FETCH_ASSOC);
+        $mc->set('user_stats_' . $user['id'], $stats, 5);
+    }
 
     $me = $this->get('helper')->get_session_user();
 
-    return $this->get('view')->render($response, 'user.php', ['posts' => $posts, 'user' => $user, 'post_count' => $post_count, 'comment_count' => $comment_count, 'commented_count'=> $commented_count, 'me' => $me]);
+    return $this->get('view')->render($response, 'user.php', [
+        'posts'           => $posts,
+        'user'            => $user,
+        'post_count'      => $stats['post_count'],
+        'comment_count'   => $stats['comment_count'],
+        'commented_count' => $stats['commented_count'],
+        'me'              => $me,
+    ]);
 });
 
 $app->run();
