@@ -460,7 +460,7 @@ $app->post('/', function (Request $request, Response $response) {
         return $response->withStatus(422);
     }
 
-    if ($_FILES['file']) {
+    if (isset($_FILES['file']) && $_FILES['file']['error'] === UPLOAD_ERR_OK) {
         $mime = '';
         // 投稿のContent-Typeからファイルのタイプを決定する
         if (strpos($_FILES['file']['type'], 'jpeg') !== false) {
